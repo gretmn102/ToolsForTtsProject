@@ -1,0 +1,13 @@
+RESTRICTION: >= net461
+NUGET
+  remote: https://www.nuget.org/api/v2
+    FAKE (5.16)
+    FSharp.Core (4.7.1)
+    Fuchu (1.1)
+      FSharp.Core (>= 4.3.4)
+    Newtonsoft.Json (12.0.3)
+
+GROUP Build
+NUGET
+  remote: https://www.nuget.org/api/v2
+    FAKE (5.16)

@@ -1,0 +1,12 @@
+source https://www.nuget.org/api/v2
+
+framework: >= net461
+nuget FAKE
+nuget FSharp.Core
+nuget Fuchu
+nuget Newtonsoft.Json
+
+group Build
+source https://www.nuget.org/api/v2
+
+nuget FAKE
