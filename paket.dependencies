@@ -6,7 +6,5 @@ nuget FSharp.Core
 nuget Fuchu
 nuget Newtonsoft.Json
 
-group Build
-source https://www.nuget.org/api/v2
-
-nuget FAKE
+git https://github.com/gretmn102/FsharpMyExtension.git build:"build.cmd NuGet", Packages: /FsharpMyExtension/FsharpMyExtension/bin/Release/
+nuget FsharpMyExt

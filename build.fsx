@@ -9,13 +9,13 @@ open Fake.Core
 // --------------------------------------------------------------------------------------
 // Build variables
 // --------------------------------------------------------------------------------------
-let testPath = !! "**/test.fsproj" |> Seq.tryHead
+let testPath = !! "test/**/test.fsproj" |> Seq.tryHead
 // --------------------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------------------
 open Fake.DotNet
 let buildConf = DotNet.BuildConfiguration.Debug
-let dotnetSdk = lazy DotNet.install DotNet.Versions.Release_2_1_4
+let dotnetSdk = lazy DotNet.install DotNet.Versions.Release_2_1_402
 let inline dtntSmpl arg = DotNet.Options.lift dotnetSdk.Value arg
 
 // --------------------------------------------------------------------------------------
@@ -45,9 +45,9 @@ Target.create "Test" (fun _ ->
     )
     |> Option.map (fun dir ->
         let result =
-            Process.execSimple (fun info ->
-                info.WithFileName dir) TimeSpan.MaxValue
-        if result <> 0 then failwith "tests failed"
+            CreateProcess.fromRawCommand dir []
+            |> Proc.run
+        if result.ExitCode <> 0 then failwith "tests failed"
     )
     |> Option.defaultWith (fun () -> failwith "test not found" )
 )
@@ -56,11 +56,6 @@ Target.create "Test" (fun _ ->
 // Build order
 // --------------------------------------------------------------------------------------
 open Fake.Core.TargetOperators
-// "Clean"
-//   ==> "Restore"
-//   ==> "Build"
-//   ==> "Test"
-
 
 "BuildTest"
   ==> "Test"
