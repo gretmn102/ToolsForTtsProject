@@ -1,5 +1,6 @@
 module ToolForTtsProject
 open FsharpMyExtension
+open FsharpMyExtension.Either
 
 type ObjectState =
     {
@@ -69,113 +70,199 @@ let testTypes () =
     Json.serf "output\\act.json" act
     ()
 
-let extract (root:Root) : (FileName * Script) list =
-    let f name xmlUI luaScript =
-        let x =
-            if System.String.IsNullOrEmpty xmlUI then
-                None
-            else
-                (sprintf "%s.xml" name, xmlUI)
-                |> Some
-        let y =
-            if System.String.IsNullOrEmpty luaScript then
-                None
-            else
-                (sprintf "%s.lua" name, luaScript)
-                |> Some
-        match x, y with
-        | None, None -> []
-        | Some x, None -> [x]
-        | None, Some y -> [y]
-        | Some x, Some y -> [x; y]
-    let xs =
-        root.ObjectStates
-        |> List.collect (fun x -> f x.GUID x.XmlUI x.LuaScript)
-    f "global" root.XmlUI root.LuaScript @ xs
+type Guid = string
+type Content = string
+type Ext = Xml | Lua
 
-let substitute (root:Root) (m:Map<FileName, Script>) =
+type SourceFileName = { Name:string option; Guid:Guid; Ext:Ext; }
+
+[<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
+[<RequireQualifiedAccess>]
+module SourceFileName =
+    let sprint (x:SourceFileName) =
+        x.Name
+        |> Option.map (sprintf "%s.")
+        |> Option.defaultValue ""
+        |> fun s -> sprintf "%s%s.%A" s x.Guid x.Ext
+
+    module Parser =
+        type GlobalOrOther =
+            | Global of Ext
+            | Other of SourceFileName
+
+        open FParsec
+        type 'a Parser = Parser<'a, unit>
+        let pext =
+            let pext =
+                (pstringCI "xml" >>% Xml) <|> (pstringCI "lua" >>% Lua)
+            pext .>>? eof
+        let pother : _ Parser =
+            pipe2
+                (many1Satisfy ((<>) '.') .>> pchar '.')
+                ((pext |>> fun ext -> None, ext)
+                 <|> pipe2
+                        (many1Satisfy ((<>) '.') .>> pchar '.')
+                        pext
+                        (fun x ext -> Some x, ext))
+                (fun first (second, ext) ->
+                    match second with
+                    | Some guid ->
+                        { Name = Some first; Guid = guid; Ext = ext }
+                    | None ->
+                        { Name = None; Guid = first; Ext = ext }
+                    |> Other
+                )
+        let pglobal : _ Parser =
+            pstringCI "global" .>>? pchar '.'
+            >>? pext
+            |>> fun ext -> Global ext
+            // |>> fun ext ->
+            //     { Name = Some "global"; Guid = ""; Ext = ext }
+
+        open FsharpMyExtension.Either
+        let start str =
+            match run ((pglobal <|> pother) .>> eof) str with
+            | Success(x, _, _) -> Right x
+            | Failure(str, _, _) -> Left str
+
+type Project =
+    {
+        Global:{| LuaContent:Content option; XmlContent:Content option |}
+        Xml:Map<Guid, SourceFileName * Content>
+        Lua:Map<Guid, SourceFileName * Content>
+    }
+let emptyProject =
+    {
+        Global = {| LuaContent = None; XmlContent = None |}
+        Xml = Map.empty
+        Lua = Map.empty
+    }
+
+let preLoadProject xs =
+    let error x y =
+        sprintf "%s и %s have the same id"
+            (SourceFileName.sprint x)
+            (SourceFileName.sprint y)
+
+    let rec f (acc: Project) = function
+        | ((x : SourceFileName.Parser.GlobalOrOther), content:Content)::xs ->
+            match x with
+            | SourceFileName.Parser.Other x ->
+                match x.Ext with
+                | Lua ->
+                    let m = acc.Lua
+                    match Map.tryFind x.Guid m with
+                    | None ->
+                        let m = Map.add x.Guid (x, content) m
+                        f { acc with Lua = m } xs
+                    | Some (y, _) -> Left(error y x)
+                | Xml ->
+                    let m = acc.Xml
+                    match Map.tryFind x.Guid m with
+                    | None ->
+                        let m = Map.add x.Guid (x, content) m
+                        f { acc with Xml = m } xs
+                    | Some (y, _) -> Left(error y x)
+            | SourceFileName.Parser.Global ext ->
+                match ext with
+                | Xml -> {| acc.Global with XmlContent = Some content |}
+                | Lua -> {| acc.Global with LuaContent = Some content |}
+                |> fun x -> f { acc with Global = x } xs
+        | [] -> Right acc
+    f emptyProject xs
+
+let loadProject dir =
+    let files = System.IO.Directory.GetFiles dir
+
+    files
+    |> Array.choose (fun path ->
+        System.IO.Path.GetFileName path
+        |> SourceFileName.Parser.start
+        |> Either.map (
+            fun x -> x, System.IO.File.ReadAllText path
+        )
+        |> Option.ofEither
+    )
+    |> Array.toList // OPTIMIZE: превратить в `seq`
+    |> preLoadProject
+
+let substitute (root:Root) (project:Project) =
     let root =
-        match Map.tryFind "global.lua" m with
+        match project.Global.LuaContent with
         | Some x ->
             { root with LuaScript = x }
         | None -> root
     let root =
-        match Map.tryFind "global.xml" m with
+        match project.Global.XmlContent with
         | Some x ->
             { root with XmlUI = x }
         | None -> root
     root.ObjectStates
     |> List.map (fun x ->
         let x =
-            match Map.tryFind (sprintf "%s.lua" x.GUID) m with
-            | Some y -> { x with LuaScript = y }
+            match Map.tryFind x.GUID project.Lua with
+            | Some(srcFileName, content) -> { x with LuaScript = content }
             | None -> x
         let x =
-            match Map.tryFind (sprintf "%s.xml" x.GUID) m with
-            | Some y -> { x with XmlUI = y }
+            match Map.tryFind x.GUID project.Xml with
+            | Some(srcFileName, content) -> { x with XmlUI = content }
             | None -> x
         x
     )
     |> fun xs -> { root with ObjectStates = xs }
 
-let test () =
-    let path = @"C:\Users\User\Documents\My Games\Tabletop Simulator\Saves\TS_Save_1089.json"
-    let x = FSharpJsonType.Serialize.desf path : Root
-    let y = extract x |> Map.ofList |> substitute x
-    x = y
 
-let substitute2 (root:FSharpJsonType.JsonF) (m:Map<FileName, Script>) =
-    let f2 root fileName fieldName m =
-        let get =
-            FSharpJsonType.JsonF.getScalar
-            >> function FSharpJsonType.JsonFType.StringTyp x -> x
-        match root with
-        | FSharpJsonType.JsonF.Obj x ->
-            match Map.tryFind (fileName (get x.["GUID"]) ) m with
-            | Some y ->
-                let v =
-                    FSharpJsonType.JsonFType.StringTyp y
-                    |> FSharpJsonType.JsonF.Scalar
-                Map.add fieldName v x
-                |> FSharpJsonType.JsonF.Obj
-            | None -> x |> FSharpJsonType.JsonF.Obj
-    let f root fileName fieldName m =
-        match Map.tryFind fileName m with
-        | Some x ->
-            match root with
-            | FSharpJsonType.JsonF.Obj o ->
-                let v =
-                    FSharpJsonType.JsonFType.StringTyp x
-                    |> FSharpJsonType.JsonF.Scalar
-                Map.add fieldName v o
-                |> FSharpJsonType.JsonF.Obj
-        | None -> root
-    let root =
-        f root "global.lua" "LuaScript" m
-    let root =
-        f root "global.xml" "XmlUI" m
-    match root with
-    | FSharpJsonType.JsonF.Obj o ->
-        match o.["ObjectStates"] with
-        | FSharpJsonType.JsonF.Sequence xs ->
-            xs
-            |> Array.map (fun x ->
-                let x =
-                    f2 x (sprintf "%s.lua") "LuaScript" m
-                let x =
-                    f2 x (sprintf "%s.xml") "XmlUI" m
-                x
-            )
-            |> fun xs ->
-                Map.add "ObjectStates" (FSharpJsonType.JsonF.Sequence xs) o
+let extract (root:Root) (project:Project) : Project =
+    let f name xmlUI luaScript project =
+        let project =
+            if System.String.IsNullOrEmpty xmlUI then
+                project
+            else
+                let m = project.Xml
+                match Map.tryFind name m with
+                | Some (srcFileName, _) ->
+                    { project with
+                        Xml = Map.add name (srcFileName, xmlUI) m
+                    }
+                | None ->
+                    let srcFileName = { Name = None; Guid = name; Ext = Xml }
+                    { project with
+                        Xml = Map.add name (srcFileName, xmlUI) m
+                    }
 
-open FsharpMyExtension.Either
+        if System.String.IsNullOrEmpty luaScript then
+            project
+        else
+            let m = project.Lua
+            match Map.tryFind name m with
+            | Some (srcFileName, _) ->
+                { project with
+                    Lua = Map.add name (srcFileName, luaScript) m
+                }
+            | None ->
+                let srcFileName = { Name = None; Guid = name; Ext = Lua }
+                { project with
+                    Lua = Map.add name (srcFileName, luaScript) m
+                }
+    let project =
+        let f content =
+            if System.String.IsNullOrEmpty content then
+                None
+            else
+                Some content
+        { project with
+            Global = {| LuaContent = f root.LuaScript; XmlContent = f root.XmlUI |}
+        }
+
+    root.ObjectStates
+    |> List.fold (fun st x -> f x.GUID x.XmlUI x.LuaScript st) project
+
 [<EntryPoint>]
 let main argv =
     let printHelp () =
         [
             "--help — эта справка"
-            "--extract — вынимает все luaScript и XmlUI и сохраняет в отдельные файлы"
+            "--extract — вынимает все luaScript и XmlUI и сохраняет в отдельные файлы с перезаписью существующих"
             "--substitute — считывает все файлы скриптов и XmlUI и записывает в save"
         ]
         |> String.concat "\n"
@@ -191,7 +278,7 @@ let main argv =
                 Left(e.Message)
         | [||] -> Left "any save file with extension .json not found"
         | xs -> Left (sprintf "found greater than one save files:\n%A" xs)
-    
+
     match argv with
     | [| "--help" |] ->
         printHelp ()
@@ -200,29 +287,45 @@ let main argv =
         |> Either.either
             (printfn "%s")
             (fun (_, root : Root) ->
-                extract root
-                |> List.iter (fun (fileName, script) ->
-                    System.IO.File.WriteAllText(fileName, script)
-                )
+                let dir = System.Environment.CurrentDirectory
+
+                match loadProject dir with
+                | Left err ->
+                    printfn "%s" err
+                | Right proj ->
+                    let proj = extract root proj
+                    seq {
+                        match proj.Global.LuaContent with
+                        | Some content ->
+                            "global.lua", content
+                        | None -> ()
+                        match proj.Global.XmlContent with
+                        | Some content ->
+                            "global.xml", content
+                        | None -> ()
+                        yield!
+                            proj.Lua
+                            |> Seq.map (fun (KeyValue(k, (srcFileName, content))) ->
+                                SourceFileName.sprint srcFileName, content
+                            )
+                    }
+                    |> Seq.iter (fun (fileName, script) ->
+                        System.IO.File.WriteAllText(fileName, script)
+                    )
             )
     | [| "--substitute" |] ->
         getSave()
         |> Either.either
             (printfn "%s")
-            (fun (savePath, (root : FSharpJsonType.JsonF)) ->
-                let m =
-                    // let path = @"c:\Users\User\Documents\My Games\Tabletop Simulator\Saves\Temp"
-                    // System.IO.Directory.GetFiles(path)
-                    System.IO.Directory.GetFiles(System.Environment.CurrentDirectory)
-                    |> Array.filter (
-                        System.IO.Path.GetExtension
-                        >> fun x -> x = ".xml" || x = ".lua")
-                    |> Array.map (fun path ->
-                        System.IO.Path.GetFileName path, System.IO.File.ReadAllText path
-                    )
-                    |> Map.ofArray
-                substitute2 root m
-                |> FSharpJsonType.Serialize.serf savePath
+            (fun (savePath, (root : Root)) ->
+                let dir = System.Environment.CurrentDirectory
+
+                match loadProject dir with
+                | Left err ->
+                    printfn "%s" err
+                | Right m ->
+                    substitute root m
+                    |> FSharpJsonType.Serialize.serf savePath
             )
     | x -> printHelp ()
     0
