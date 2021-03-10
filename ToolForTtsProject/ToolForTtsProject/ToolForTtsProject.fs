@@ -186,31 +186,34 @@ let loadProject dir =
     |> Array.toList // OPTIMIZE: превратить в `seq`
     |> preLoadProject
 
-let substitute (root:Root) (project:Project) =
-    let root =
+open Newtonsoft.Json.Linq
+let substitute (root:JToken) (project:Project) =
+    match root.Type with
+    | JTokenType.Object ->
+        let root = root :?> JObject
         match project.Global.LuaContent with
         | Some x ->
-            { root with LuaScript = x }
-        | None -> root
-    let root =
+            root.["LuaScript"] <- JValue(x)
+        | None -> ()
+
         match project.Global.XmlContent with
         | Some x ->
-            { root with XmlUI = x }
-        | None -> root
-    root.ObjectStates
-    |> List.map (fun x ->
-        let x =
-            match Map.tryFind x.GUID project.Lua with
-            | Some(srcFileName, content) -> { x with LuaScript = content }
-            | None -> x
-        let x =
-            match Map.tryFind x.GUID project.Xml with
-            | Some(srcFileName, content) -> { x with XmlUI = content }
-            | None -> x
-        x
-    )
-    |> fun xs -> { root with ObjectStates = xs }
+            root.["XmlUI"] <- JValue(x)
+        | None -> ()
 
+        root.["ObjectStates"]
+        |> Seq.iter (fun x ->
+            match Map.tryFind (x.["GUID"].Value<string>()) project.Lua with
+            | Some(srcFileName, content) ->
+                x.["LuaScript"] <- JValue(content)
+            | None -> ()
+
+            match Map.tryFind (x.["GUID"].Value<string>()) project.Xml with
+            | Some(srcFileName, content) ->
+                x.["XmlUI"] <- JValue(content)
+            | None -> ()
+        )
+    | _ -> failwithf "something wrong with json"
 
 let extract (root:Root) (project:Project) : Project =
     let f name xmlUI luaScript project =
@@ -317,7 +320,7 @@ let main argv =
         getSave()
         |> Either.either
             (printfn "%s")
-            (fun (savePath, (root : Root)) ->
+            (fun (savePath, (root : JToken)) ->
                 let dir = System.Environment.CurrentDirectory
 
                 match loadProject dir with
@@ -325,7 +328,12 @@ let main argv =
                     printfn "%s" err
                 | Right m ->
                     substitute root m
-                    |> FSharpJsonType.Serialize.serf savePath
+
+                    use file = System.IO.File.CreateText(savePath)
+                    use st = new Newtonsoft.Json.JsonTextWriter(file)
+                    st.Formatting <- Newtonsoft.Json.Formatting.Indented
+                    let ser = Newtonsoft.Json.JsonSerializer()
+                    ser.Serialize(st, root)
             )
     | x -> printHelp ()
     0
